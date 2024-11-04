@@ -2,94 +2,132 @@ from scapy.all import *
 import random
 import time
 
-class ProPacketFuzzer:
-    def __init__(self, target_ip, target_port, delay=0.1, log_file="fuzzer_log.txt"):
-        """
-        Initialize the fuzzer with target details and configuration options.
-        
-        Args:
-            target_ip (str): The target IP address.
-            target_port (int): The target port number.
-            delay (float): Delay between packet transmissions in seconds.
-            log_file (str): File path for logging packet details and responses.
-        """
-        self.target_ip = target_ip
-        self.target_port = target_port
-        self.delay = delay
-        self.log_file = log_file
+def random_bytes(length=10):
+    """Generate random bytes of a specified length."""
+    return bytes(random.getrandbits(8) for _ in range(length))
 
-        # Open log file
-        with open(self.log_file, 'w') as f:
-            f.write("Fuzzing Log\n")
-            f.write("="*20 + "\n")
+def generate_random_packet(destination_ip):
+    """
+    Generate a random packet with various layer combinations and malformed fields.
+    """
+    ip = IP(dst=destination_ip)
+    tcp = TCP()
+    udp = UDP()
+    icmp = ICMP()
+    raw = Raw(load=random_bytes(20))
+    
+    # Randomly choose a packet type
+    packet_options = [
+        ip/tcp,  # IP + TCP
+        ip/udp,  # IP + UDP
+        ip/icmp, # IP + ICMP
+        ip/raw   # IP + Raw Data
+    ]
+    packet = random.choice(packet_options)
+    
+    # Randomize IP fields
+    packet[IP].version = random.randint(0, 15)      # Invalid IP version
+    packet[IP].ihl = random.randint(0, 15)          # Invalid header length
+    packet[IP].len = random.randint(0, 20)          # Too short packet length
+    packet[IP].ttl = random.randint(0, 1)           # Very low TTL
+    packet[IP].id = random.randint(0, 65535)        # Random identification
+    packet[IP].flags = random.randint(0, 7)         # Random flags
 
-    def generate_packet(self):
-        """Generate a packet with random combinations and malformed fields."""
-        # Randomly select base protocol
-        protocol_choice = random.choice(["TCP", "UDP", "ICMP"])
-        
-        if protocol_choice == "TCP":
-            packet = IP(dst=self.target_ip) / TCP(dport=self.target_port)
-            packet[TCP].seq = random.randint(0, 0xFFFFFFFF)
-            packet[TCP].ack = random.randint(0, 0xFFFFFFFF)
-            packet[TCP].window = random.randint(0, 0xFFFF)
-            packet[TCP].flags = random.choice(["S", "A", "R", "F", "P", ""])
-        
-        elif protocol_choice == "UDP":
-            packet = IP(dst=self.target_ip) / UDP(dport=self.target_port)
-            packet[UDP].len = random.randint(1, 65535)
-        
-        elif protocol_choice == "ICMP":
-            packet = IP(dst=self.target_ip) / ICMP()
-            packet[ICMP].type = random.choice(range(0, 256))
-            packet[ICMP].code = random.choice(range(0, 256))
-        
-        # Add random payload or combine with another protocol
-        if random.choice([True, False]):
-            payload_size = random.randint(20, 100)
-            packet = packet / Raw(RandString(size=payload_size))
-        
-        # Combine with another layer to create unpredictable packets
-        if random.choice([True, False]):
-            extra_protocol = random.choice(["TCP", "UDP", "ICMP"])
-            if extra_protocol == "TCP" and "TCP" not in packet:
-                packet = packet / TCP(dport=random.randint(1, 65535), flags="S")
-            elif extra_protocol == "UDP" and "UDP" not in packet:
-                packet = packet / UDP(dport=random.randint(1, 65535))
-            elif extra_protocol == "ICMP" and "ICMP" not in packet:
-                packet = packet / ICMP(type=random.randint(0, 15), code=random.randint(0, 15))
+    # Malform TCP layer if present
+    if TCP in packet:
+        packet[TCP].flags = random.randint(0, 255)    # Random TCP flags
+        packet[TCP].seq = random.randint(0, 1 << 32)  # Random sequence number
+        packet[TCP].sport = random.randint(0, 65535)  # Random source port
+        packet[TCP].dport = random.randint(0, 65535)  # Random destination port
 
-        return packet
+    # Malform UDP layer if present
+    if UDP in packet:
+        packet[UDP].len = random.randint(0, 5)        # Invalid UDP length
+        packet[UDP].sport = random.randint(0, 65535)  # Random source port
+        packet[UDP].dport = random.randint(0, 65535)  # Random destination port
 
-    def log_packet(self, packet, response):
-        """Log packet and response information."""
-        with open(self.log_file, 'a') as f:
-            f.write(f"Packet Sent: {packet.summary()}\n")
-            if response:
-                f.write(f"Response Received: {response.summary()}\n")
-            f.write("-" * 20 + "\n")
+    # Malform ICMP layer if present
+    if ICMP in packet:
+        packet[ICMP].type = random.randint(0, 255)    # Random ICMP type
+        packet[ICMP].code = random.randint(0, 255)    # Random ICMP code
 
-    def start_fuzzing(self):
-        """Continuously send packets with random configurations, logging each result."""
-        print("Starting continuous fuzzing process...")
-        
+    return bytes(packet)
+
+def generate_fragmented_packet(destination_ip):
+    """
+    Generate a fragmented IP packet with unusual parameters.
+    """
+    ip = IP(dst=destination_ip)
+    udp = UDP(sport=random.randint(1024, 65535), dport=random.randint(1024, 65535))
+    payload = random_bytes(1400)  # Large payload to ensure fragmentation
+    fragments = fragment(ip/udp/payload)
+    for fragment in fragments:
+        fragment[IP].flags = "MF"  # More fragments flag
+        fragment[IP].frag = random.randint(0, 8191)  # Random fragment offset
+    return [bytes(fragment) for fragment in fragments]
+
+def generate_flag_manipulated_packet(destination_ip):
+    """
+    Generate a packet with unusual TCP flag combinations.
+    """
+    ip = IP(dst=destination_ip)
+    tcp = TCP(sport=random.randint(1024, 65535), dport=random.randint(1024, 65535), flags=random.choice(['S', 'F', 'R', 'FA', 'SA']))
+    return bytes(ip/tcp)
+
+def generate_protocol_layer_mix_packet(destination_ip):
+    """
+    Generate a packet with both TCP and UDP headers, or mixed protocols.
+    """
+    ip = IP(dst=destination_ip)
+    tcp = TCP(sport=random.randint(1024, 65535), dport=random.randint(1024, 65535))
+    udp = UDP(sport=random.randint(1024, 65535), dport=random.randint(1024, 65535))
+    packet = ip/tcp/udp/Raw(load=random_bytes(20))
+    return bytes(packet)
+
+def fuzz_packet_structure(destination_ip):
+    """
+    Randomly modify a packet structure to create undefined behavior.
+    """
+    ip = IP(dst=destination_ip, version=random.randint(0, 15), ihl=random.randint(0, 15), ttl=random.randint(0, 1))
+    udp = UDP(sport=random.randint(1024, 65535), dport=random.randint(1024, 65535), len=random.randint(0, 5))
+    return bytes(ip/udp/Raw(load=random_bytes(50)))
+
+def generate_malformed_packet(destination_ip):
+    """
+    Select a method at random to generate a malformed packet.
+    """
+    methods = [
+        generate_random_packet,
+        generate_fragmented_packet,
+        generate_flag_manipulated_packet,
+        fuzz_packet_structure,
+        generate_protocol_layer_mix_packet,
+    ]
+    selected_method = random.choice(methods)
+    
+    result = selected_method(destination_ip)
+    if isinstance(result, list):  # Handle fragmented packets
+        return b'\n'.join(result)
+    return result
+
+def write_packets_to_file(filename="malformed_packets.txt", delay=0.5):
+    """
+    Continuously generates malformed packets and writes each to a file in hex format.
+    :param filename: Name of the file to save packets.
+    :param delay: Delay between generating each packet.
+    """
+    destination_ip = input("Enter the destination IP address: ")  # Get IP from user
+    with open(filename, "a") as file:
         while True:
-            packet = self.generate_packet()
-            response = sr1(packet, timeout=1, verbose=False)  # Send packet and wait for one response
-            self.log_packet(packet, response)
-            print(f"Packet sent: {packet.summary()}")
-            if response:
-                print(f"Response: {response.summary()}")
+            malformed_packet = generate_malformed_packet(destination_ip)
+            hex_packet = malformed_packet.hex()  # Convert to hex string
+            file.write(hex_packet + "\n")
+            file.flush()  # Ensure immediate writing
+            time.sleep(delay)
 
-            time.sleep(self.delay)
-
-# Usage Example
-target_ip = "192.168.1.100"  # Replace with actual target IP
-target_port = 80             # Replace with actual target port
-fuzzer = ProPacketFuzzer(
-    target_ip=target_ip, 
-    target_port=target_port, 
-    delay=0.1,
-    log_file="fuzzer_log.txt"
-)
-fuzzer.start_fuzzing()  # Continuous fuzzing, no packet count limit
+if __name__ == "__main__":
+    try:
+        write_packets_to_file(delay=0.1)
+        print("Generating malformed packets continuously. Check malformed_packets.txt for output.")
+    except KeyboardInterrupt:
+        print("Packet generation stopped by user.")
